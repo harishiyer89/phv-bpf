@@ -20,6 +20,12 @@
 #define REC_HAS_IRQ_DELAY (1u << 3)
 #define REC_HAS_WPCOPY    (1u << 4)
 #define REC_HAS_IO        (1u << 5)
+/* Bits 6 and 7 are Go-side (RecFDFloor, RecPartial). REC_HAS_SCHED_INFO: the
+ * task has sched_info (CONFIG_SCHED_INFO, selected by SCHEDSTATS or
+ * TASK_DELAY_ACCT); without it run_delay, run_periods and last_queued are
+ * unavailable, not zero (I3). The fallback sets the same bit when
+ * /proc/[pid]/schedstat exists, which needs the same option. */
+#define REC_HAS_SCHED_INFO (1u << 8)
 
 /* 336 bytes (D11: 04's "288" was a slip). One per THREAD per Pass A (04 §1.3). */
 struct task_record {

@@ -117,11 +117,20 @@ static __always_inline void fill_cpu(struct task_record *rec, struct task_struct
 	rec->stime = t->stime;
 	rec->gtime = t->gtime;
 	rec->sum_exec_runtime = t->se.sum_exec_runtime;
+	rec->nvcsw = t->nvcsw;
+	rec->nivcsw = t->nivcsw;
+
+	/* sched_info exists only with CONFIG_SCHED_INFO; unguarded, its absence
+	 * is a poisoned relocation that refuses the whole program, as the
+	 * delays member did on cilium's 6.1 arm64 kernel (2026-09-15). Guarded,
+	 * the three fields stay 0 and the flag says they were never read (I3). */
+	if (!bpf_core_field_exists(t->sched_info))
+		return;
+
 	rec->run_delay = t->sched_info.run_delay; /* live without the sysctl on >= 5.14 (04 §1.1) */
 	rec->run_periods = t->sched_info.pcount;
 	rec->last_queued = t->sched_info.last_queued;
-	rec->nvcsw = t->nvcsw;
-	rec->nivcsw = t->nivcsw;
+	rec->rec_flags |= REC_HAS_SCHED_INFO;
 }
 
 /* The mm fields stay 0 when task->mm is NULL (a kernel thread, a zombie
@@ -166,10 +175,20 @@ static __always_inline void fill_io(struct task_record *rec, struct task_struct 
 
 static __always_inline void fill_delays(struct task_record *rec, struct task_struct *t)
 {
-	struct task_delay_info *d = t->delays;
+	struct task_delay_info *d;
+
+	/* A kernel built without CONFIG_TASK_DELAY_ACCT has no delays member at
+	 * all, and an unguarded load of it is a poisoned relocation that makes
+	 * the verifier refuse the whole program (measured: cilium ci-kernels 6.1
+	 * arm64, 2026-09-15). Absent member and NULL pointer mean the same thing
+	 * here: no delay accounting for this task, fields 0 and unflagged (I3). */
+	if (!bpf_core_field_exists(t->delays))
+		return;
+
+	d = t->delays;
 
 	if (!d)
-		return; /* delayacct off for this task: fields stay 0 and unflagged (04 §1.2, I3) */
+		return; /* delayacct off for this task (04 §1.2, I3) */
 
 	rec->rec_flags |= REC_HAS_DELAYS;
 	rec->blkio_delay = d->blkio_delay;
