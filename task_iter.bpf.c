@@ -82,11 +82,15 @@ static __always_inline __s32 last_cpu(struct task_struct *t)
 	return 0;
 }
 
+/* Per-thread identity and scheduling. num_threads and oom_score_adj are the
+ * group's (signal_struct, one pointer shared by the group, so the load is
+ * hot) and every record carries them: iter.Aggregate measures a group
+ * against num_threads from any record. The fields only the leader needs to
+ * carry are in fill_leader. */
 static __always_inline void fill_identity(struct task_record *rec, struct task_struct *t)
 {
 	struct signal_struct *sig = t->signal;
 
-	rec->cgroup_id = t->cgroups->dfl_cgrp->kn->id;
 	rec->start_boottime = t->start_boottime;
 	rec->tgid = t->tgid;
 	rec->pid = t->pid;
@@ -98,10 +102,6 @@ static __always_inline void fill_identity(struct task_record *rec, struct task_s
 	rec->nr_cpus_allowed = t->nr_cpus_allowed;
 	rec->flags = t->flags;
 	rec->last_cpu = last_cpu(t);
-	__builtin_memcpy(rec->comm, t->comm, TASK_COMM_LEN);
-
-	if (rec->pid == rec->tgid)
-		rec->rec_flags |= REC_IS_LEADER;
 
 	if (bpf_core_field_exists(t->__state)) {
 		rec->state = t->__state;
@@ -109,6 +109,27 @@ static __always_inline void fill_identity(struct task_record *rec, struct task_s
 	} else {
 		rec->state = ((struct task_struct___old *)t)->state;
 	}
+}
+
+/* The cgroup id (four dependent loads, 04 §1.4) and comm are the
+ * process's, taken by iter.Aggregate from the leader's record; a thread
+ * without its leader in the walk is dropped by the collector rather than
+ * named from a thread, so the other threads skip both. Measured on the 6.8
+ * arm64 VM at 20,000 threads: 6.5 -> 5.8 ms p50 in the throwaway partition
+ * experiment with every process-scope read gated (2026-09-15), and 7.34 ->
+ * 6.75 -> 7.28 ms p50 A/B/A of TaskIter.Read with this program on the same
+ * VM a day later (absolute numbers differ by the VM's day, the saving does
+ * not). A leader that exits mid-walk after its threads were emitted leaves
+ * no record with an mm; iter.markPartial flags that process rather than
+ * shipping zero memory (I3). */
+static __always_inline void fill_leader(struct task_record *rec, struct task_struct *t)
+{
+	if (t->pid != t->tgid) /* the task's own fields: no dependence on fill order */
+		return;
+
+	rec->rec_flags |= REC_IS_LEADER;
+	rec->cgroup_id = t->cgroups->dfl_cgrp->kn->id;
+	__builtin_memcpy(rec->comm, t->comm, TASK_COMM_LEN);
 }
 
 static __always_inline void fill_cpu(struct task_record *rec, struct task_struct *t)
@@ -133,16 +154,26 @@ static __always_inline void fill_cpu(struct task_record *rec, struct task_struct
 	rec->rec_flags |= REC_HAS_SCHED_INFO;
 }
 
-/* The mm fields stay 0 when task->mm is NULL (a kernel thread, a zombie
- * leader), and iter.Aggregate takes total_vm == 0 as "no mm" (§7.4). */
+/* The faults and dirtied counts are per thread. The mm fields are the
+ * process's: read from the leader, and from a thread only when the leader's
+ * own mm is gone -- a zombie leader stays in the walk with mm NULL (probed
+ * on 6.8) and iter.Aggregate then takes memory from the first thread with an
+ * mm (§7.4). Any other thread skips the mm pointer chase and four loads. A
+ * thread with a live leader therefore reports total_vm 0, which Aggregate
+ * reads as "no mm here", never as the process having none. */
 static __always_inline void fill_mm(struct task_record *rec, struct task_struct *t)
 {
-	struct mm_struct *mm = t->mm;
+	struct mm_struct *mm;
 
 	rec->min_flt = t->min_flt;
 	rec->maj_flt = t->maj_flt;
 	rec->nr_dirtied = t->nr_dirtied;
 	rec->nr_dirtied_pause = t->nr_dirtied_pause;
+
+	if (t->pid != t->tgid && t->group_leader->mm)
+		return;
+
+	mm = t->mm;
 
 	if (!mm)
 		return;
@@ -200,8 +231,10 @@ static __always_inline void fill_delays(struct task_record *rec, struct task_str
 	rec->freepages_count = d->freepages_count;
 	rec->thrashing_count = d->thrashing_count;
 
-	if (bpf_core_field_exists(d->compact_delay))
+	if (bpf_core_field_exists(d->compact_delay)) {
 		rec->compact_delay = d->compact_delay;
+		rec->rec_flags |= REC_HAS_COMPACT;
+	}
 
 	if (bpf_core_field_exists(d->wpcopy_delay)) {
 		rec->wpcopy_delay = d->wpcopy_delay;
@@ -224,6 +257,7 @@ int phv_task(struct bpf_iter__task *ctx)
 		return 0;
 
 	fill_identity(&rec, t);
+	fill_leader(&rec, t);
 	fill_cpu(&rec, t);
 	fill_mm(&rec, t);
 	fill_io(&rec, t);

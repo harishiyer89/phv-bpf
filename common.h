@@ -26,6 +26,12 @@
  * unavailable, not zero (I3). The fallback sets the same bit when
  * /proc/[pid]/schedstat exists, which needs the same option. */
 #define REC_HAS_SCHED_INFO (1u << 8)
+/* REC_HAS_COMPACT: delays->compact_delay exists (5.17+, 04 §5) and was read.
+ * Without the member the field is never written, so it stays 0 under
+ * REC_HAS_DELAYS and nothing tells it from a measured zero (#1, panel round
+ * 1); the flag says it was read, as REC_HAS_WPCOPY and REC_HAS_IRQ_DELAY do
+ * for theirs, and like them it is set only after delays itself was read. */
+#define REC_HAS_COMPACT    (1u << 9)
 
 /* 336 bytes (D11: 04's "288" was a slip). One per THREAD per Pass A (04 §1.3). */
 struct task_record {
